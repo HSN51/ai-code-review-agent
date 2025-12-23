@@ -1,0 +1,112 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-code-review-agent"
+version = "1.0.0"
+description = "AI-powered code review agent with multi-agent architecture"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "SEN0414 Team", email = "team@university.edu"}
+]
+keywords = ["ai", "code-review", "static-analysis", "openai", "fastapi"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+dependencies = [
+    "fastapi==0.109.0",
+    "uvicorn==0.27.0",
+    "pydantic==2.5.0",
+    "pydantic-settings==2.1.0",
+    "openai==1.12.0",
+    "httpx==0.26.0",
+    "aiohttp==3.9.1",
+    "python-dotenv==1.0.0",
+    "pylint==3.0.3",
+    "ruff==0.1.14",
+    "bandit==1.7.7",
+    "cachetools==5.3.2",
+    "tenacity==8.2.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==7.4.4",
+    "pytest-cov==4.1.0",
+    "pytest-asyncio==0.23.3",
+    "black==24.1.0",
+    "isort==5.13.2",
+    "mypy==1.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/university/ai-code-review-agent"
+Documentation = "https://github.com/university/ai-code-review-agent/docs"
+Repository = "https://github.com/university/ai-code-review-agent"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+skip_gitignore = true
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "W", "C90", "I", "N", "UP", "B", "A", "C4", "PT", "RET", "SIM"]
+ignore = ["E501"]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = ["*/__pycache__/*", "*/tests/*", "*/.venv/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+fail_under = 90
+show_missing = true
+
