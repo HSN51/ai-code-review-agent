@@ -300,17 +300,6 @@ class MyCustomAgent(BaseAgent):
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 👥 Team Members
-
-**SEN0414 - Software Engineering Final Project**
-
-| Name | Student ID | Role |
-|------|------------|------|
-| [Team Member 1] | [ID] | [Role] |
-| [Team Member 2] | [ID] | [Role] |
-| [Team Member 3] | [ID] | [Role] |
-| [Team Member 4] | [ID] | [Role] |
-
 ## 🙏 Acknowledgments
 
 - [FastAPI](https://fastapi.tiangolo.com/) - Modern Python web framework
