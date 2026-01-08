@@ -16,7 +16,8 @@ from src.agents.security_agent import SecurityAgent
 from src.agents.testing_agent import TestingAgent
 from src.analyzers.llm_analyzer import LLMAnalyzer
 from src.analyzers.static_analyzer import StaticAnalyzer
-from src.models.schemas import Finding, ReviewResult, ReviewStatus, Severity
+from src.models.schemas import Finding, ReviewResult, ReviewStatus, Severity, ToolExecutionStatus, ScoreBreakdown
+from src.normalization import normalize_finding, normalize_severity, normalize_category
 
 
 class Orchestrator:
@@ -124,7 +125,7 @@ class Orchestrator:
 
         try:
             # Run all agents in parallel
-            all_findings = await self._run_agents_parallel(code, file_path, language)
+            all_findings, tool_status = await self._run_agents_parallel(code, file_path, language)
 
             # Deduplicate findings
             deduplicated = self._deduplicate_findings(all_findings)
@@ -136,18 +137,20 @@ class Orchestrator:
             agent_summaries = self._generate_agent_summaries(sorted_findings)
 
             # Calculate overall score
-            score = self._calculate_score(sorted_findings, len(code.splitlines()))
+            score_data = self.calculate_score(sorted_findings, len(code.splitlines()))
 
             # Generate overall summary
             summary = await self._generate_summary(
-                code, file_path, sorted_findings, score
+                code, file_path, sorted_findings, score_data.final_score
             )
 
             # Update result
             result.findings = sorted_findings
             result.summary = summary
-            result.overall_score = score
+            result.overall_score = score_data.final_score
+            result.score_breakdown = score_data
             result.agent_summaries = agent_summaries
+            result.tool_status = tool_status
             result.status = ReviewStatus.COMPLETED
 
         except Exception as e:
@@ -168,17 +171,10 @@ class Orchestrator:
         code: str,
         file_path: str,
         language: str,
-    ) -> list[Finding]:
+    ) -> tuple[list[Finding], dict[str, ToolExecutionStatus]]:
         """
         Run all agents in parallel.
-
-        Args:
-            code: The source code.
-            file_path: Path to the file.
-            language: Programming language.
-
-        Returns:
-            Combined list of findings from all agents.
+        Returns (all_findings, aggregated_tool_status)
         """
         tasks = [
             agent.analyze(code, file_path, language)
@@ -188,6 +184,8 @@ class Orchestrator:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_findings = []
+        tool_statuses = {}
+        
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 self._logger.error(
@@ -195,49 +193,45 @@ class Orchestrator:
                     exc_info=True,
                 )
             else:
-                all_findings.extend(result)
+                # Expecting (list[Finding], dict[str, ToolExecutionStatus])
+                findings, statuses = result
+                all_findings.extend(findings)
+                tool_statuses.update(statuses)
 
-        return all_findings
+        return all_findings, tool_statuses
 
     def _deduplicate_findings(self, findings: list[Finding]) -> list[Finding]:
         """
-        Remove duplicate findings.
-
-        Deduplication is based on file path, line number, and message similarity.
-
-        Args:
-            findings: List of findings to deduplicate.
-
-        Returns:
-            Deduplicated list of findings.
+        Remove duplicate findings using fingerprints and prioritization.
         """
-        seen = set()
-        deduplicated = []
-
+        unique_map = {}
+        
         for finding in findings:
-            # Create a key based on location and message content
-            key = (
-                finding.file_path,
-                finding.line_number,
-                finding.message[:100],  # First 100 chars of message
-            )
-
-            if key not in seen:
-                seen.add(key)
-                deduplicated.append(finding)
+            # 1. Normalize
+            finding = normalize_finding(finding)
+            fp = finding.fingerprint
+            
+            # 2. Add to sources
+            if fp in unique_map:
+                existing = unique_map[fp]
+                if finding.agent_name not in existing.sources:
+                    existing.sources.append(finding.agent_name)
+                    
+                # Conflict resolution:
+                # Prefer SecurityAgent for security issues
+                if finding.agent_name == "SecurityAgent" and existing.agent_name != "SecurityAgent":
+                    # Swap
+                    finding.sources = existing.sources
+                    unique_map[fp] = finding
+                # Else if same agent or independent, check confidence
+                elif finding.confidence > existing.confidence:
+                     finding.sources = existing.sources
+                     unique_map[fp] = finding
             else:
-                # If duplicate, keep the one with higher confidence
-                for i, existing in enumerate(deduplicated):
-                    existing_key = (
-                        existing.file_path,
-                        existing.line_number,
-                        existing.message[:100],
-                    )
-                    if existing_key == key and finding.confidence > existing.confidence:
-                        deduplicated[i] = finding
-                        break
+                finding.sources = [finding.agent_name]
+                unique_map[fp] = finding
 
-        return deduplicated
+        return list(unique_map.values())
 
     def _sort_by_severity(self, findings: list[Finding]) -> list[Finding]:
         """
@@ -310,23 +304,10 @@ class Orchestrator:
 
         return summaries
 
-    def _calculate_score(self, findings: list[Finding], total_lines: int) -> float:
+    def calculate_score(self, findings: list[Finding], total_lines: int) -> ScoreBreakdown:
         """
-        Calculate overall code quality score.
-
-        Score starts at 100 and is reduced based on findings.
-
-        Args:
-            findings: List of findings.
-            total_lines: Total lines of code.
-
-        Returns:
-            Score from 0 to 100.
+        Calculate robust score with breakdown.
         """
-        if not findings:
-            return 100.0
-
-        # Deduction weights per severity
         weights = {
             Severity.CRITICAL: 15.0,
             Severity.HIGH: 8.0,
@@ -334,20 +315,36 @@ class Orchestrator:
             Severity.LOW: 1.0,
             Severity.INFO: 0.5,
         }
-
+        
+        deductions_by_severity = {s.value: 0.0 for s in Severity}
         total_deduction = 0.0
-        for finding in findings:
-            deduction = weights.get(finding.severity, 1.0)
-            # Reduce deduction slightly based on confidence
-            deduction *= finding.confidence
+        
+        for f in findings:
+            weight = weights.get(f.severity, 1.0)
+            deduction = weight * f.confidence
+            deductions_by_severity[f.severity.value] += deduction
             total_deduction += deduction
-
-        # Scale deduction based on code size (more lenient for larger files)
-        size_factor = max(1.0, total_lines / 100)
-        scaled_deduction = total_deduction / size_factor
-
-        score = max(0.0, 100.0 - scaled_deduction)
-        return round(score, 1)
+            
+        # Scale based on density
+        density = len(findings) / max(50, total_lines)
+        # density 0.0 -> scale 1.0
+        # density 0.2 (10 issues in 50 lines) -> scale 1.1
+        scale = max(0.8, min(1.2, 1.0 + (density - 0.05)))
+        
+        final_deduction = total_deduction * scale
+        final_score = max(0.0, min(100.0, 100.0 - final_deduction))
+        
+        return ScoreBreakdown(
+            base_score=100.0,
+            total_deductions=round(final_deduction, 1),
+            deductions_by_severity=deductions_by_severity,
+            scale_factor=round(scale, 2),
+            final_score=round(final_score, 1)
+        )
+            
+    def _calculate_score(self, findings: list[Finding], total_lines: int) -> float:
+        """Legacy wrapper"""
+        return self.calculate_score(findings, total_lines).final_score
 
     async def _generate_summary(
         self,

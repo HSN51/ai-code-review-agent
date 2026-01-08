@@ -34,69 +34,69 @@ class TestQualityAgent:
     @pytest.mark.asyncio
     async def test_analyze_empty_code(self, quality_agent):
         """Test analysis of empty code."""
-        findings = await quality_agent.analyze("", "empty.py")
+        findings, _ = await quality_agent.analyze("", "empty.py")
         # Empty code might not produce findings depending on tools
         assert isinstance(findings, list)
 
     @pytest.mark.asyncio
     async def test_analyze_simple_code(self, quality_agent, sample_python_code):
         """Test analysis of simple Python code."""
-        findings = await quality_agent.analyze(sample_python_code, "simple.py")
-        assert isinstance(findings, list)
+        findings_list, _ = await quality_agent.analyze(sample_python_code, "simple.py")
+        assert isinstance(findings_list, list)
         # All findings should have agent name set
-        for finding in findings:
+        for finding in findings_list:
             assert finding.agent_name == "QualityAgent"
 
     @pytest.mark.asyncio
     async def test_analyze_complex_code(self, quality_agent, sample_complex_code):
         """Test analysis of complex code."""
-        findings = await quality_agent.analyze(sample_complex_code, "complex.py")
+        findings, _ = await quality_agent.analyze(sample_complex_code, "complex.py")
         assert isinstance(findings, list)
 
     @pytest.mark.asyncio
     async def test_analyze_with_ruff_findings(self):
         """Test analysis when ruff returns findings."""
         mock_static = AsyncMock(spec=StaticAnalyzer)
-        mock_static.run_ruff = AsyncMock(return_value=[
+        mock_static.run_ruff = AsyncMock(return_value=([
             {
                 "code": "E501",
                 "message": "Line too long",
                 "line": 10,
                 "column": 80,
             }
-        ])
-        mock_static.run_pylint = AsyncMock(return_value=[])
+        ], {}))
+        mock_static.run_pylint = AsyncMock(return_value=([], {}))
 
         mock_llm = AsyncMock(spec=LLMAnalyzer)
         mock_llm.get_suggestion = AsyncMock(return_value="Consider breaking this line.")
         mock_llm.analyze_code_quality = AsyncMock(return_value=[])
 
         agent = QualityAgent(static_analyzer=mock_static, llm_analyzer=mock_llm)
-        findings = await agent.analyze("x = 1", "test.py")
-
-        assert len(findings) >= 1
-        assert findings[0].rule_id == "ruff:E501"
+        findings_list, _ = await agent.analyze("x = 1", "test.py")
+        
+        assert len(findings_list) >= 1
+        assert findings_list[0].rule_id == "ruff:E501"
 
     @pytest.mark.asyncio
     async def test_analyze_with_pylint_findings(self):
         """Test analysis when pylint returns findings."""
         mock_static = AsyncMock(spec=StaticAnalyzer)
-        mock_static.run_ruff = AsyncMock(return_value=[])
-        mock_static.run_pylint = AsyncMock(return_value=[
+        mock_static.run_ruff = AsyncMock(return_value=([], {}))
+        mock_static.run_pylint = AsyncMock(return_value=([
             {
                 "code": "C0301",
                 "message": "Line too long",
                 "line": 5,
                 "symbol": "line-too-long",
             }
-        ])
+        ], {}))
 
         mock_llm = AsyncMock(spec=LLMAnalyzer)
         mock_llm.get_suggestion = AsyncMock(return_value="Refactor the line.")
         mock_llm.analyze_code_quality = AsyncMock(return_value=[])
 
         agent = QualityAgent(static_analyzer=mock_static, llm_analyzer=mock_llm)
-        findings = await agent.analyze("x = 1", "test.py")
+        findings, _ = await agent.analyze("x = 1", "test.py")
 
         assert len(findings) >= 1
 
@@ -104,8 +104,8 @@ class TestQualityAgent:
     async def test_analyze_with_ai_only_findings(self):
         """Test analysis when only AI finds issues."""
         mock_static = AsyncMock(spec=StaticAnalyzer)
-        mock_static.run_ruff = AsyncMock(return_value=[])
-        mock_static.run_pylint = AsyncMock(return_value=[])
+        mock_static.run_ruff = AsyncMock(return_value=([], {}))
+        mock_static.run_pylint = AsyncMock(return_value=([], {}))
 
         mock_llm = AsyncMock(spec=LLMAnalyzer)
         mock_llm.analyze_code_quality = AsyncMock(return_value=[
@@ -119,7 +119,7 @@ class TestQualityAgent:
         ])
 
         agent = QualityAgent(static_analyzer=mock_static, llm_analyzer=mock_llm)
-        findings = await agent.analyze("x = 1", "test.py")
+        findings, _ = await agent.analyze("x = 1", "test.py")
 
         assert len(findings) >= 1
         # AI findings have lower confidence
@@ -162,10 +162,10 @@ class TestQualityAgent:
     async def test_enhance_with_ai_suggestions_error_handling(self):
         """Test AI suggestion enhancement error handling."""
         mock_static = AsyncMock(spec=StaticAnalyzer)
-        mock_static.run_ruff = AsyncMock(return_value=[
+        mock_static.run_ruff = AsyncMock(return_value=([
             {"code": "E501", "message": "Test", "line": 1}
-        ])
-        mock_static.run_pylint = AsyncMock(return_value=[])
+        ], {}))
+        mock_static.run_pylint = AsyncMock(return_value=([], {}))
 
         mock_llm = AsyncMock(spec=LLMAnalyzer)
         mock_llm.get_suggestion = AsyncMock(side_effect=Exception("API Error"))
@@ -173,7 +173,7 @@ class TestQualityAgent:
 
         agent = QualityAgent(static_analyzer=mock_static, llm_analyzer=mock_llm)
         # Should not raise, should return findings without AI enhancement
-        findings = await agent.analyze("x = 1", "test.py")
+        findings, _ = await agent.analyze("x = 1", "test.py")
         assert isinstance(findings, list)
 
     @pytest.mark.asyncio

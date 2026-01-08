@@ -34,23 +34,23 @@ class TestSecurityAgent:
     @pytest.mark.asyncio
     async def test_analyze_secure_code(self, security_agent, sample_python_code):
         """Test analysis of secure code."""
-        findings = await security_agent.analyze(sample_python_code, "secure.py")
+        findings, _ = await security_agent.analyze(sample_python_code, "secure.py")
         assert isinstance(findings, list)
 
     @pytest.mark.asyncio
     async def test_analyze_insecure_code(self, security_agent, sample_insecure_code):
         """Test analysis of insecure code."""
-        findings = await security_agent.analyze(sample_insecure_code, "insecure.py")
-        assert isinstance(findings, list)
+        findings_list, _ = await security_agent.analyze(sample_insecure_code, "insecure.py")
+        assert isinstance(findings_list, list)
         # All findings should have agent name set
-        for finding in findings:
+        for finding in findings_list:
             assert finding.agent_name == "SecurityAgent"
 
     @pytest.mark.asyncio
     async def test_analyze_with_bandit_findings(self):
         """Test analysis when bandit returns findings."""
         mock_static = AsyncMock(spec=StaticAnalyzer)
-        mock_static.run_bandit = AsyncMock(return_value=[
+        mock_static.run_bandit = AsyncMock(return_value=([
             {
                 "test_id": "B608",
                 "test_name": "hardcoded_sql_expressions",
@@ -59,7 +59,7 @@ class TestSecurityAgent:
                 "severity": "HIGH",
                 "confidence": "MEDIUM",
             }
-        ])
+        ], {}))
 
         mock_llm = AsyncMock(spec=LLMAnalyzer)
         mock_llm.explain_vulnerability = AsyncMock(
@@ -68,7 +68,7 @@ class TestSecurityAgent:
         mock_llm.analyze_security = AsyncMock(return_value=[])
 
         agent = SecurityAgent(static_analyzer=mock_static, llm_analyzer=mock_llm)
-        findings = await agent.analyze("query = f'SELECT * FROM users WHERE id = {x}'", "test.py")
+        findings, _ = await agent.analyze("query = f'SELECT * FROM users WHERE id = {x}'", "test.py")
 
         assert len(findings) >= 1
         assert findings[0].category == FindingCategory.SQL_INJECTION
@@ -78,7 +78,7 @@ class TestSecurityAgent:
     async def test_analyze_with_ai_findings(self):
         """Test analysis when AI detects additional issues."""
         mock_static = AsyncMock(spec=StaticAnalyzer)
-        mock_static.run_bandit = AsyncMock(return_value=[])
+        mock_static.run_bandit = AsyncMock(return_value=([], {}))
 
         mock_llm = AsyncMock(spec=LLMAnalyzer)
         mock_llm.analyze_security = AsyncMock(return_value=[
@@ -93,7 +93,7 @@ class TestSecurityAgent:
         ])
 
         agent = SecurityAgent(static_analyzer=mock_static, llm_analyzer=mock_llm)
-        findings = await agent.analyze("api_key = 'abc123'", "test.py")
+        findings, _ = await agent.analyze("api_key = 'abc123'", "test.py")
 
         assert len(findings) >= 1
 
@@ -154,9 +154,9 @@ class TestSecurityAgent:
     async def test_enhance_with_ai_explanations_error(self):
         """Test AI explanation error handling."""
         mock_static = AsyncMock(spec=StaticAnalyzer)
-        mock_static.run_bandit = AsyncMock(return_value=[
+        mock_static.run_bandit = AsyncMock(return_value=([
             {"test_id": "B608", "message": "Test", "line_number": 1, "severity": "HIGH", "confidence": "HIGH"}
-        ])
+        ], {}))
 
         mock_llm = AsyncMock(spec=LLMAnalyzer)
         mock_llm.explain_vulnerability = AsyncMock(side_effect=Exception("API Error"))
@@ -164,7 +164,7 @@ class TestSecurityAgent:
 
         agent = SecurityAgent(static_analyzer=mock_static, llm_analyzer=mock_llm)
         # Should not raise, should return findings without AI enhancement
-        findings = await agent.analyze("x = 1", "test.py")
+        findings, _ = await agent.analyze("x = 1", "test.py")
         assert isinstance(findings, list)
 
     @pytest.mark.asyncio
@@ -178,7 +178,7 @@ class TestSecurityAgent:
 
         agent = SecurityAgent(static_analyzer=mock_static, llm_analyzer=mock_llm)
         # Should not raise
-        findings = await agent.analyze("x = 1", "test.py")
+        findings, _ = await agent.analyze("x = 1", "test.py")
         assert isinstance(findings, list)
 
     def test_repr(self):

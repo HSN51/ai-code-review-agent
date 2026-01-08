@@ -162,7 +162,9 @@ class ReviewService:
             )
 
             # Calculate overall score
-            result.overall_score = self._calculate_score(all_findings)
+            score_data = self._orchestrator.calculate_score(all_findings, total_lines)
+            result.overall_score = score_data.final_score
+            result.score_breakdown = score_data
 
             # Generate summary
             result.summary = self._generate_pr_summary(

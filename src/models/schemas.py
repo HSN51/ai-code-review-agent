@@ -66,6 +66,25 @@ class ReviewStatus(str, Enum):
     FAILED = "failed"
 
 
+class ToolExecutionStatus(BaseModel):
+    """Status of a tool execution."""
+    tool_name: str
+    executed: bool
+    exit_code: int = 0
+    stderr: str = ""
+    error: str = ""
+
+
+class ScoreBreakdown(BaseModel):
+    """Breakdown of the score calculation."""
+    base_score: float = 100.0
+    total_deductions: float
+    deductions_by_severity: dict[str, float]
+    scale_factor: float
+    final_score: float
+
+
+
 class Finding(BaseModel):
     """
     Represents a single finding from code analysis.
@@ -101,6 +120,9 @@ class Finding(BaseModel):
     code_snippet: Optional[str] = Field(None, description="Code snippet showing the issue")
     owasp_category: Optional[str] = Field(None, description="OWASP category for security issues")
     confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Confidence level")
+    fingerprint: Optional[str] = Field(None, description="Unique fingerprint for deduplication")
+    sources: list[str] = Field(default_factory=list, description="Agents that reported this finding")
+
 
     @field_validator("end_line_number", mode="after")
     @classmethod
@@ -161,6 +183,11 @@ class ReviewResult(BaseModel):
     agent_summaries: dict[str, str] = Field(
         default_factory=dict, description="Summary from each agent"
     )
+    tool_status: dict[str, ToolExecutionStatus] = Field(
+        default_factory=dict, description="Execution status of each tool"
+    )
+    score_breakdown: Optional[ScoreBreakdown] = Field(None, description="Details of score calculation")
+
 
     @property
     def critical_count(self) -> int:

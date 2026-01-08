@@ -4,7 +4,7 @@ Quality Agent for AI Code Review Agent.
 Analyzes code quality using ruff, pylint, and AI-powered suggestions.
 """
 
-from typing import Optional
+from typing import Optional, Any
 
 from src.agents.base_agent import BaseAgent
 from src.analyzers.llm_analyzer import LLMAnalyzer
@@ -86,7 +86,7 @@ class QualityAgent(BaseAgent):
         code: str,
         file_path: str = "untitled.py",
         language: str = "python",
-    ) -> list[Finding]:
+    ) -> tuple[list[Finding], dict[str, Any]]:
         """
         Analyze code quality.
 
@@ -99,20 +99,30 @@ class QualityAgent(BaseAgent):
             language: Programming language of the code.
 
         Returns:
-            List of Finding objects representing quality issues.
+            Tuple of (findings, tool_statuses).
         """
         self._log_analysis_start(file_path)
         findings: list[Finding] = []
+        tool_status = {}
 
         try:
             # Run static analysis with ruff
-            ruff_results = await self._static_analyzer.run_ruff(code, file_path)
+            ruff_results, ruff_status = await self._static_analyzer.run_ruff(code, file_path)
+            tool_status["ruff"] = ruff_status
+            
             for result in ruff_results:
+                # Filter out security issues from Ruff to avoid double counting with SecurityAgent
+                # Ruff codes dealing with security often start with S (flake8-bandit)
+                if result.get("code", "").startswith("S"):
+                    continue
+
                 finding = self._convert_static_result(result, file_path, "ruff")
                 findings.append(finding)
 
             # Run static analysis with pylint
-            pylint_results = await self._static_analyzer.run_pylint(code, file_path)
+            pylint_results, pylint_status = await self._static_analyzer.run_pylint(code, file_path)
+            tool_status["pylint"] = pylint_status
+            
             for result in pylint_results:
                 finding = self._convert_static_result(result, file_path, "pylint")
                 findings.append(finding)
@@ -122,7 +132,6 @@ class QualityAgent(BaseAgent):
                 findings = await self._enhance_with_ai_suggestions(code, findings)
 
             # Always run AI analysis for deeper, senior-level insights.
-            # We want to provide architectural advice even if the code style is perfect.
             ai_findings = await self._run_ai_quality_analysis(code, file_path)
             findings.extend(ai_findings)
 
@@ -130,7 +139,7 @@ class QualityAgent(BaseAgent):
             self._log_error("Error during quality analysis", e)
 
         self._log_analysis_complete(file_path, len(findings))
-        return findings
+        return findings, tool_status
 
     def _convert_static_result(
         self,

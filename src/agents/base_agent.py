@@ -6,7 +6,7 @@ Defines the abstract base class that all agents must inherit from.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Any
 
 from src.models.schemas import Finding
 
@@ -57,7 +57,7 @@ class BaseAgent(ABC):
         code: str,
         file_path: str = "untitled.py",
         language: str = "python",
-    ) -> list[Finding]:
+    ) -> tuple[list[Finding], dict[str, Any]]:
         """
         Analyze code and return findings.
 
@@ -69,7 +69,7 @@ class BaseAgent(ABC):
             language: Programming language of the code.
 
         Returns:
-            List of Finding objects representing issues found.
+            Tuple of (List of Finding objects, Dict of tool execution statuses).
         """
         pass
 

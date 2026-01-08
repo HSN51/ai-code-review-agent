@@ -4,7 +4,7 @@ Security Agent for AI Code Review Agent.
 Analyzes code for security vulnerabilities using bandit and AI-powered detection.
 """
 
-from typing import Optional
+from typing import Optional, Any
 
 from src.agents.base_agent import BaseAgent
 from src.analyzers.llm_analyzer import LLMAnalyzer
@@ -132,7 +132,7 @@ class SecurityAgent(BaseAgent):
         code: str,
         file_path: str = "untitled.py",
         language: str = "python",
-    ) -> list[Finding]:
+    ) -> tuple[list[Finding], dict[str, Any]]:
         """
         Analyze code for security vulnerabilities.
 
@@ -145,14 +145,17 @@ class SecurityAgent(BaseAgent):
             language: Programming language of the code.
 
         Returns:
-            List of Finding objects representing security issues.
+            Tuple of (findings, tool_statuses).
         """
         self._log_analysis_start(file_path)
         findings: list[Finding] = []
+        tool_status = {}
 
         try:
             # Run bandit security scan
-            bandit_results = await self._static_analyzer.run_bandit(code, file_path)
+            bandit_results, bandit_status = await self._static_analyzer.run_bandit(code, file_path)
+            tool_status["bandit"] = bandit_status
+            
             for result in bandit_results:
                 finding = self._convert_bandit_result(result, file_path)
                 findings.append(finding)
@@ -169,7 +172,7 @@ class SecurityAgent(BaseAgent):
             self._log_error("Error during security analysis", e)
 
         self._log_analysis_complete(file_path, len(findings))
-        return findings
+        return findings, tool_status
 
     def _convert_bandit_result(self, result: dict, file_path: str) -> Finding:
         """

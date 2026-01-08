@@ -30,7 +30,7 @@ class TestTestingAgent:
     @pytest.mark.asyncio
     async def test_analyze_regular_code(self, testing_agent, sample_python_code):
         """Test analysis of regular (non-test) code."""
-        findings = await testing_agent.analyze(sample_python_code, "src/module.py")
+        findings, _ = await testing_agent.analyze(sample_python_code, "src/module.py")
         assert isinstance(findings, list)
         for finding in findings:
             assert finding.agent_name == "TestingAgent"
@@ -38,13 +38,13 @@ class TestTestingAgent:
     @pytest.mark.asyncio
     async def test_analyze_test_code(self, testing_agent, sample_test_code):
         """Test analysis of test code."""
-        findings = await testing_agent.analyze(sample_test_code, "tests/test_module.py")
+        findings, _ = await testing_agent.analyze(sample_test_code, "tests/test_module.py")
         assert isinstance(findings, list)
 
     @pytest.mark.asyncio
     async def test_analyze_complex_code(self, testing_agent, sample_complex_code):
         """Test analysis of complex code for test coverage."""
-        findings = await testing_agent.analyze(sample_complex_code, "src/complex.py")
+        findings, _ = await testing_agent.analyze(sample_complex_code, "src/complex.py")
         assert isinstance(findings, list)
         # Complex code should have coverage suggestions
         # Note: actual findings depend on the code structure
@@ -170,7 +170,7 @@ def highly_complex_function(a, b, c, d, e):
                         return 1
     return 0
 """
-        findings = await agent.analyze(code, "src/module.py")
+        findings, _ = await agent.analyze(code, "src/module.py")
         
         # Should suggest tests for complex function
         complex_findings = [f for f in findings if "complex" in f.message.lower()]
@@ -199,7 +199,7 @@ def test_something():
     x = 1 + 1
     # No assertion!
 """
-        findings = await agent.analyze(code, "test_module.py")
+        findings, _ = await agent.analyze(code, "test_module.py")
         
         # Should detect missing assertions
         assertion_findings = [f for f in findings if "assertion" in f.message.lower()]

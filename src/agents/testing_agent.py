@@ -6,7 +6,7 @@ Analyzes test coverage gaps and suggests missing test cases.
 
 import ast
 import re
-from typing import Optional
+from typing import Optional, Any
 
 from src.agents.base_agent import BaseAgent
 from src.analyzers.llm_analyzer import LLMAnalyzer
@@ -42,7 +42,7 @@ class TestingAgent(BaseAgent):
         code: str,
         file_path: str = "untitled.py",
         language: str = "python",
-    ) -> list[Finding]:
+    ) -> tuple[list[Finding], dict[str, Any]]:
         """
         Analyze code for testing gaps and improvements.
 
@@ -55,7 +55,7 @@ class TestingAgent(BaseAgent):
             language: Programming language of the code.
 
         Returns:
-            List of Finding objects representing testing issues.
+            Tuple of (findings, tool_status).
         """
         self._log_analysis_start(file_path)
         findings: list[Finding] = []
@@ -110,7 +110,7 @@ class TestingAgent(BaseAgent):
             self._log_error("Error during testing analysis", e)
 
         self._log_analysis_complete(file_path, len(findings))
-        return findings
+        return findings, {}
 
     def _severity_rank(self, severity) -> int:
         ranks = {

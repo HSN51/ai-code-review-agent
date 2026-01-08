@@ -20,6 +20,7 @@ from src.models.schemas import (
 )
 from src.services.github_service import GitHubService, PRDetails, PRFile
 from src.services.review_service import ReviewService
+from src.models.schemas import ScoreBreakdown
 
 
 class TestReviewService:
@@ -152,6 +153,13 @@ class TestReviewService:
             findings=[],
             status=ReviewStatus.COMPLETED,
         ))
+        mock_orchestrator.calculate_score = MagicMock(return_value=ScoreBreakdown(
+            base_score=100.0,
+            total_deductions=0.0,
+            deductions_by_severity={},
+            scale_factor=1.0,
+            final_score=100.0
+        ))
         
         service = ReviewService(
             orchestrator=mock_orchestrator,
@@ -217,6 +225,13 @@ class TestReviewService:
         mock_orchestrator.review = AsyncMock(return_value=ReviewResult(
             findings=[finding],
             status=ReviewStatus.COMPLETED,
+        ))
+        mock_orchestrator.calculate_score = MagicMock(return_value=ScoreBreakdown(
+            base_score=100.0,
+            total_deductions=5.0,
+            deductions_by_severity={"HIGH": 5.0},
+            scale_factor=1.0,
+            final_score=95.0
         ))
         
         service = ReviewService(

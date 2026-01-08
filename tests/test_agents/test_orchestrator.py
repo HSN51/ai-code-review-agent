@@ -25,8 +25,8 @@ class MockAgent(BaseAgent):
         super().__init__(name=name, description=f"Mock {name}")
         self._mock_findings = findings or []
 
-    async def analyze(self, code: str, file_path: str = "test.py", language: str = "python") -> list[Finding]:
-        return self._mock_findings
+    async def analyze(self, code: str, file_path: str = "test.py", language: str = "python") -> tuple[list[Finding], dict]:
+        return self._mock_findings, {}
 
 
 class TestOrchestrator:
@@ -107,7 +107,7 @@ class TestOrchestrator:
         async def slow_analyze(code, file_path, language):
             call_times.append(asyncio.get_event_loop().time())
             await asyncio.sleep(0.1)
-            return []
+            return [], {}
         
         mock_agent1 = MockAgent("Agent1")
         mock_agent1.analyze = slow_analyze

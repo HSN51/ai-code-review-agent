@@ -105,32 +105,28 @@ class StaticAnalyzer:
         except OSError as e:
             self._logger.debug(f"Failed to delete temp file {path}: {e}")
 
-    async def _run_tool(self, tool_name: str, args: List[str], temp_path: str, timeout: float = 30.0) -> str:
+    async def _run_tool_with_status(self, tool_name: str, args: List[str], temp_path: str, timeout: float = 30.0) -> tuple[str, Any]:
         """
         Helper to run a tool subprocess with correct path resolution.
+        Returns (stdout, ToolExecutionStatus)
         """
+        from src.models.schemas import ToolExecutionStatus
+        
+        status = ToolExecutionStatus(tool_name=tool_name, executed=False)
+        
         resolved_cmd = await self._resolve_tool_path(tool_name)
         if not resolved_cmd:
-            raise RuntimeError(f"Tool {tool_name} not available")
+            status.error = f"Tool {tool_name} not available in PATH or python modules"
+            return "", status
 
         # Handle "python -m tool" case
         if resolved_cmd.startswith(sys.executable):
-            # Split "C:\Python\python.exe -m tool" -> ["C:\Python\python.exe", "-m", "tool"]
-            # But resolved_cmd is just the string. We need accurate args.
-            # Simplified: usage relies on _resolve_tool_path returning a runnable string?
-            # No, asyncio.create_subprocess_exec needs the program as first arg.
-            
-            # If we detected module mode, we reconstruct the args
-            # cmd_parts = [sys.executable, "-m", tool_name] + args
             program = sys.executable
             final_args = ["-m", tool_name] + args
         else:
-            # Standard binary case
             program = resolved_cmd
             final_args = args
 
-        # Ensure temp_path is in args if needed (logic passed by caller)
-        # Append temp_path to final_args
         final_args.append(temp_path)
 
         # Set environment for UTF-8
@@ -138,6 +134,7 @@ class StaticAnalyzer:
         env["PYTHONIOENCODING"] = "utf-8"
 
         try:
+            status.executed = True
             process = await asyncio.create_subprocess_exec(
                 program,
                 *final_args,
@@ -146,61 +143,65 @@ class StaticAnalyzer:
                 env=env
             )
             
-            stdout, stderr = await asyncio.wait_for(
+            stdout_data, stderr_data = await asyncio.wait_for(
                 process.communicate(),
                 timeout=timeout
             )
             
-            if stderr:
-                self._logger.debug(f"{tool_name} stderr: {stderr.decode('utf-8', errors='replace')}")
+            status.exit_code = process.returncode
+            if stderr_data:
+                status.stderr = stderr_data.decode("utf-8", errors="replace")[:1000] # Truncate
 
-            if stdout:
-                return stdout.decode("utf-8", errors="replace")
-            return ""
+            stdout_str = ""
+            if stdout_data:
+                stdout_str = stdout_data.decode("utf-8", errors="replace")
+
+            return stdout_str, status
 
         except asyncio.TimeoutError:
-            self._logger.error(f"{tool_name} analysis timed out after {timeout}s")
-            # Try to kill
+            status.error = f"Analysis timed out after {timeout}s"
+            status.exit_code = -1
             try:
                 process.kill()
             except Exception:
                 pass
-            raise
+            return "", status
+            
         except Exception as e:
+            status.error = f"Execution failed: {e}"
+            status.exit_code = -1
             self._logger.error(f"{tool_name} execution failed: {e}")
-            raise
+            return "", status
 
     async def run_ruff(
         self,
         code: str,
         file_path: str = "untitled.py",
         timeout: float = 30.0,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], Any]:
         """Run ruff linter on the code."""
-        if not await self._check_tool_available("ruff"):
-            return []
-
+        from src.models.schemas import ToolExecutionStatus
+        
+        # Check availability implicitly via run_tool
         temp_path = await self._write_temp_file(code)
         try:
-            # Arguments for ruff
             args = [
                 "check",
                 "--output-format=json",
                 "--select=ALL",
                 "--ignore=D,ANN",
-                "--exit-zero"  # Important: ensures ruff doesn't return non-zero exit code on lint errors
+                "--exit-zero"
             ]
             
-            stdout = await self._run_tool("ruff", args, temp_path, timeout)
+            stdout, status = await self._run_tool_with_status("ruff", args, temp_path, timeout)
             
             results = []
-            if stdout:
+            if stdout and status.exit_code == 0:
                 try:
                     ruff_output = json.loads(stdout)
                     if isinstance(ruff_output, list):
                         for item in ruff_output:
-                            if not isinstance(item, dict):
-                                continue
+                            if not isinstance(item, dict): continue
                             results.append({
                                 "code": item.get("code", ""),
                                 "message": item.get("message", ""),
@@ -211,15 +212,16 @@ class StaticAnalyzer:
                                 "suggestion": item.get("fix", {}).get("message", ""),
                             })
                     else:
-                        self._logger.warning(f"Unexpected ruff output format: {type(ruff_output)}")
+                        status.error = f"Unexpected output format: {type(ruff_output)}"
                 except json.JSONDecodeError as e:
-                    self._logger.error(f"Failed to parse ruff output: {e}\nRaw output: {stdout[:100]}...")
+                    status.error = f"JSON parse error: {e}"
+                    self._logger.error(f"Failed to parse ruff output: {e}")
 
-            return results
+            return results, status
 
         except Exception as e:
             self._logger.error(f"Error running ruff: {e}")
-            return []
+            return [], ToolExecutionStatus(tool_name="ruff", executed=False, error=str(e))
         finally:
             await self._cleanup_temp_file(temp_path)
 
@@ -228,32 +230,31 @@ class StaticAnalyzer:
         code: str,
         file_path: str = "untitled.py",
         timeout: float = 60.0,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], Any]:
         """Run pylint on the code."""
-        if not await self._check_tool_available("pylint"):
-            return []
-
+        from src.models.schemas import ToolExecutionStatus
+        
         temp_path = await self._write_temp_file(code)
         try:
             args = [
                 "--output-format=json",
                 "--disable=C0114,C0115,C0116",
                 "--max-line-length=120",
-                "--from-stdin" if False else "--exit-zero" # pylint doesn't support --exit-zero specifically for json output the same way, but let's try standard
+                "--exit-zero"
             ]
-            # Pylint usually returns non-zero on issues. We must handle that.
-            # _run_tool logs stderr but doesn't throw if returncode is non-zero (unless create_subprocess_exec fails). 
-            # Wait, create_subprocess_exec doesn't throw on non-zero exit.
             
-            stdout = await self._run_tool("pylint", args, temp_path, timeout)
+            stdout, status = await self._run_tool_with_status("pylint", args, temp_path, timeout)
 
             results = []
+            # Pylint exit-zero might not work on all versions/configs for json, but we try.
+            # Even if exit code is non-zero, stdout might contain valid json.
             if stdout:
                 try:
                     pylint_output = json.loads(stdout)
                     if isinstance(pylint_output, list):
                         for item in pylint_output:
-                            results.append({
+                             if not isinstance(item, dict): continue
+                             results.append({
                                 "code": item.get("message-id", ""),
                                 "message": item.get("message", ""),
                                 "line": item.get("line", 1),
@@ -262,13 +263,13 @@ class StaticAnalyzer:
                                 "severity": self._pylint_severity(item.get("type", "")),
                             })
                 except json.JSONDecodeError as e:
-                    self._logger.error(f"Failed to parse pylint output: {e}\nRaw output: {stdout[:100]}...")
+                     status.error = f"JSON parse error: {e}"
 
-            return results
+            return results, status
 
         except Exception as e:
             self._logger.error(f"Error running pylint: {e}")
-            return []
+            return [], ToolExecutionStatus(tool_name="pylint", executed=False, error=str(e))
         finally:
             await self._cleanup_temp_file(temp_path)
 
@@ -277,30 +278,27 @@ class StaticAnalyzer:
         code: str,
         file_path: str = "untitled.py",
         timeout: float = 30.0,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], Any]:
         """Run bandit security scanner on the code."""
-        if not await self._check_tool_available("bandit"):
-            return []
+        from src.models.schemas import ToolExecutionStatus
 
         temp_path = await self._write_temp_file(code)
         try:
             args = [
                 "-f", "json",
                 "-ll",
-                "--exit-zero"  # Bandit returns 1 if issues found, ensure we just get output
+                "--exit-zero"
             ]
             
-            stdout = await self._run_tool("bandit", args, temp_path, timeout)
+            stdout, status = await self._run_tool_with_status("bandit", args, temp_path, timeout)
 
             results = []
             if stdout:
                 try:
                     bandit_output = json.loads(stdout)
-                    # Bandit json format: {"errors": [], "generated_at": "...", "metrics": {...}, "results": [...]}
                     if isinstance(bandit_output, dict):
                         for item in bandit_output.get("results", []) or []:
-                            if not isinstance(item, dict):
-                                continue
+                            if not isinstance(item, dict): continue
                             results.append({
                                 "test_id": item.get("test_id", ""),
                                 "test_name": item.get("test_name", ""),
@@ -312,17 +310,14 @@ class StaticAnalyzer:
                                 "code": item.get("code", ""),
                                 "cwe": item.get("issue_cwe", {}),
                             })
-                    else:
-                         self._logger.warning(f"Unexpected bandit output format: {type(bandit_output)}")
-
                 except json.JSONDecodeError as e:
-                    self._logger.error(f"Failed to parse bandit output: {e}\nRaw output: {stdout[:100]}...")
+                    status.error = f"JSON parse error: {e}"
 
-            return results
+            return results, status
 
         except Exception as e:
             self._logger.error(f"Error running bandit: {e}")
-            return []
+            return [], ToolExecutionStatus(tool_name="bandit", executed=False, error=str(e))
         finally:
             await self._cleanup_temp_file(temp_path)
 
