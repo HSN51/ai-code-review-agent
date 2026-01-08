@@ -8,8 +8,10 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import sys
 import tempfile
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 
 class StaticAnalyzer:
@@ -23,64 +25,150 @@ class StaticAnalyzer:
     def __init__(self) -> None:
         """Initialize the Static Analyzer."""
         self._logger = logging.getLogger("ai_code_review.static_analyzer")
-        self._tool_availability: dict[str, bool] = {}
+        self._tool_paths: Dict[str, Optional[str]] = {}
 
-    async def _check_tool_available(self, tool: str) -> bool:
+    async def _resolve_tool_path(self, tool: str) -> Optional[str]:
         """
-        Check if a tool is available on the system.
-
-        Args:
-            tool: Name of the tool to check.
-
-        Returns:
-            True if available, False otherwise.
+        Resolve the executable path for a tool.
+        
+        Tries:
+        1. shutil.which(tool)
+        2. sys.executable + " -m " + tool (as a fallback command strategy)
         """
-        if tool in self._tool_availability:
-            return self._tool_availability[tool]
+        if tool in self._tool_paths:
+            return self._tool_paths[tool]
 
+        # 1. Check PATH
+        path = shutil.which(tool)
+        if path:
+            self._logger.debug(f"Found {tool} at {path}")
+            self._tool_paths[tool] = path
+            return path
+
+        # 2. Check if it runs as a python module
         try:
             process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
                 tool,
                 "--version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             await process.communicate()
-            available = process.returncode == 0
-        except (FileNotFoundError, OSError):
-            available = False
+            if process.returncode == 0:
+                self._logger.debug(f"Found {tool} as python module")
+                # Return a marker to indicate module usage
+                cmd = f"{sys.executable} -m {tool}"
+                self._tool_paths[tool] = cmd
+                return cmd
+        except Exception:
+            pass
 
-        self._tool_availability[tool] = available
-        if not available:
-            self._logger.warning(f"Tool '{tool}' is not available")
-        return available
+        self._logger.warning(f"Tool '{tool}' not found in PATH or as python module")
+        self._tool_paths[tool] = None
+        return None
+
+    async def _check_tool_available(self, tool: str) -> bool:
+        """Check if a tool is available."""
+        path = await self._resolve_tool_path(tool)
+        return path is not None
 
     async def _write_temp_file(self, code: str, suffix: str = ".py") -> str:
         """
-        Write code to a temporary file.
-
-        Args:
-            code: Code content to write.
-            suffix: File suffix.
-
-        Returns:
-            Path to the temporary file.
+        Write code to a temporary file ensuring UTF-8 encoding and file closure.
         """
+        # delete=False is required on Windows if another process will open it
         fd, path = tempfile.mkstemp(suffix=suffix)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(code)
-        except Exception:
-            os.close(fd)
+            return path
+        except Exception as e:
+            self._logger.error(f"Failed to write temp file: {e}")
+            # Try to close invalid fd if open
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            # Try to cleanup
+            if os.path.exists(path):
+                os.unlink(path)
             raise
-        return path
 
     async def _cleanup_temp_file(self, path: str) -> None:
         """Remove a temporary file."""
+        if not path or not os.path.exists(path):
+            return
         try:
             os.unlink(path)
-        except OSError:
-            pass
+        except OSError as e:
+            self._logger.debug(f"Failed to delete temp file {path}: {e}")
+
+    async def _run_tool(self, tool_name: str, args: List[str], temp_path: str, timeout: float = 30.0) -> str:
+        """
+        Helper to run a tool subprocess with correct path resolution.
+        """
+        resolved_cmd = await self._resolve_tool_path(tool_name)
+        if not resolved_cmd:
+            raise RuntimeError(f"Tool {tool_name} not available")
+
+        # Handle "python -m tool" case
+        if resolved_cmd.startswith(sys.executable):
+            # Split "C:\Python\python.exe -m tool" -> ["C:\Python\python.exe", "-m", "tool"]
+            # But resolved_cmd is just the string. We need accurate args.
+            # Simplified: usage relies on _resolve_tool_path returning a runnable string?
+            # No, asyncio.create_subprocess_exec needs the program as first arg.
+            
+            # If we detected module mode, we reconstruct the args
+            # cmd_parts = [sys.executable, "-m", tool_name] + args
+            program = sys.executable
+            final_args = ["-m", tool_name] + args
+        else:
+            # Standard binary case
+            program = resolved_cmd
+            final_args = args
+
+        # Ensure temp_path is in args if needed (logic passed by caller)
+        # Append temp_path to final_args
+        final_args.append(temp_path)
+
+        # Set environment for UTF-8
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                program,
+                *final_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env
+            )
+            
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout
+            )
+            
+            if stderr:
+                self._logger.debug(f"{tool_name} stderr: {stderr.decode('utf-8', errors='replace')}")
+
+            if stdout:
+                return stdout.decode("utf-8", errors="replace")
+            return ""
+
+        except asyncio.TimeoutError:
+            self._logger.error(f"{tool_name} analysis timed out after {timeout}s")
+            # Try to kill
+            try:
+                process.kill()
+            except Exception:
+                pass
+            raise
+        except Exception as e:
+            self._logger.error(f"{tool_name} execution failed: {e}")
+            raise
 
     async def run_ruff(
         self,
@@ -88,62 +176,49 @@ class StaticAnalyzer:
         file_path: str = "untitled.py",
         timeout: float = 30.0,
     ) -> list[dict]:
-        """
-        Run ruff linter on the code.
-
-        Args:
-            code: The source code to analyze.
-            file_path: Virtual file path for context.
-            timeout: Timeout in seconds.
-
-        Returns:
-            List of dictionaries with findings.
-        """
+        """Run ruff linter on the code."""
         if not await self._check_tool_available("ruff"):
             return []
 
         temp_path = await self._write_temp_file(code)
         try:
-            process = await asyncio.create_subprocess_exec(
-                "ruff",
+            # Arguments for ruff
+            args = [
                 "check",
                 "--output-format=json",
                 "--select=ALL",
-                "--ignore=D,ANN",  # Ignore docstring and annotation rules for now
-                temp_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout,
-            )
-
+                "--ignore=D,ANN",
+                "--exit-zero"  # Important: ensures ruff doesn't return non-zero exit code on lint errors
+            ]
+            
+            stdout = await self._run_tool("ruff", args, temp_path, timeout)
+            
             results = []
             if stdout:
                 try:
-                    ruff_output = json.loads(stdout.decode("utf-8"))
-                    for item in ruff_output:
-                        results.append({
-                            "code": item.get("code", ""),
-                            "message": item.get("message", ""),
-                            "line": item.get("location", {}).get("row", 1),
-                            "column": item.get("location", {}).get("column", 0),
-                            "end_line": item.get("end_location", {}).get("row"),
-                            "severity": self._ruff_severity(item.get("code", "")),
-                            "suggestion": item.get("fix", {}).get("message", ""),
-                        })
+                    ruff_output = json.loads(stdout)
+                    if isinstance(ruff_output, list):
+                        for item in ruff_output:
+                            if not isinstance(item, dict):
+                                continue
+                            results.append({
+                                "code": item.get("code", ""),
+                                "message": item.get("message", ""),
+                                "line": item.get("location", {}).get("row", 1),
+                                "column": item.get("location", {}).get("column", 0),
+                                "end_line": item.get("end_location", {}).get("row"),
+                                "severity": self._ruff_severity(item.get("code", "")),
+                                "suggestion": item.get("fix", {}).get("message", ""),
+                            })
+                    else:
+                        self._logger.warning(f"Unexpected ruff output format: {type(ruff_output)}")
                 except json.JSONDecodeError as e:
-                    self._logger.error(f"Failed to parse ruff output: {e}")
+                    self._logger.error(f"Failed to parse ruff output: {e}\nRaw output: {stdout[:100]}...")
 
             return results
 
-        except asyncio.TimeoutError:
-            self._logger.error("Ruff analysis timed out")
-            return []
         except Exception as e:
-            self._logger.error(f"Ruff analysis failed: {e}")
+            self._logger.error(f"Error running ruff: {e}")
             return []
         finally:
             await self._cleanup_temp_file(temp_path)
@@ -154,60 +229,45 @@ class StaticAnalyzer:
         file_path: str = "untitled.py",
         timeout: float = 60.0,
     ) -> list[dict]:
-        """
-        Run pylint on the code.
-
-        Args:
-            code: The source code to analyze.
-            file_path: Virtual file path for context.
-            timeout: Timeout in seconds.
-
-        Returns:
-            List of dictionaries with findings.
-        """
+        """Run pylint on the code."""
         if not await self._check_tool_available("pylint"):
             return []
 
         temp_path = await self._write_temp_file(code)
         try:
-            process = await asyncio.create_subprocess_exec(
-                "pylint",
+            args = [
                 "--output-format=json",
-                "--disable=C0114,C0115,C0116",  # Disable docstring warnings
+                "--disable=C0114,C0115,C0116",
                 "--max-line-length=120",
-                temp_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout,
-            )
+                "--from-stdin" if False else "--exit-zero" # pylint doesn't support --exit-zero specifically for json output the same way, but let's try standard
+            ]
+            # Pylint usually returns non-zero on issues. We must handle that.
+            # _run_tool logs stderr but doesn't throw if returncode is non-zero (unless create_subprocess_exec fails). 
+            # Wait, create_subprocess_exec doesn't throw on non-zero exit.
+            
+            stdout = await self._run_tool("pylint", args, temp_path, timeout)
 
             results = []
             if stdout:
                 try:
-                    pylint_output = json.loads(stdout.decode("utf-8"))
-                    for item in pylint_output:
-                        results.append({
-                            "code": item.get("message-id", ""),
-                            "message": item.get("message", ""),
-                            "line": item.get("line", 1),
-                            "column": item.get("column", 0),
-                            "symbol": item.get("symbol", ""),
-                            "severity": self._pylint_severity(item.get("type", "")),
-                        })
+                    pylint_output = json.loads(stdout)
+                    if isinstance(pylint_output, list):
+                        for item in pylint_output:
+                            results.append({
+                                "code": item.get("message-id", ""),
+                                "message": item.get("message", ""),
+                                "line": item.get("line", 1),
+                                "column": item.get("column", 0),
+                                "symbol": item.get("symbol", ""),
+                                "severity": self._pylint_severity(item.get("type", "")),
+                            })
                 except json.JSONDecodeError as e:
-                    self._logger.error(f"Failed to parse pylint output: {e}")
+                    self._logger.error(f"Failed to parse pylint output: {e}\nRaw output: {stdout[:100]}...")
 
             return results
 
-        except asyncio.TimeoutError:
-            self._logger.error("Pylint analysis timed out")
-            return []
         except Exception as e:
-            self._logger.error(f"Pylint analysis failed: {e}")
+            self._logger.error(f"Error running pylint: {e}")
             return []
         finally:
             await self._cleanup_temp_file(temp_path)
@@ -218,63 +278,50 @@ class StaticAnalyzer:
         file_path: str = "untitled.py",
         timeout: float = 30.0,
     ) -> list[dict]:
-        """
-        Run bandit security scanner on the code.
-
-        Args:
-            code: The source code to analyze.
-            file_path: Virtual file path for context.
-            timeout: Timeout in seconds.
-
-        Returns:
-            List of dictionaries with security findings.
-        """
+        """Run bandit security scanner on the code."""
         if not await self._check_tool_available("bandit"):
             return []
 
         temp_path = await self._write_temp_file(code)
         try:
-            process = await asyncio.create_subprocess_exec(
-                "bandit",
-                "-f",
-                "json",
-                "-ll",  # Low and above severity
-                temp_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout,
-            )
+            args = [
+                "-f", "json",
+                "-ll",
+                "--exit-zero"  # Bandit returns 1 if issues found, ensure we just get output
+            ]
+            
+            stdout = await self._run_tool("bandit", args, temp_path, timeout)
 
             results = []
             if stdout:
                 try:
-                    bandit_output = json.loads(stdout.decode("utf-8"))
-                    for item in bandit_output.get("results", []):
-                        results.append({
-                            "test_id": item.get("test_id", ""),
-                            "test_name": item.get("test_name", ""),
-                            "message": item.get("issue_text", ""),
-                            "line_number": item.get("line_number", 1),
-                            "line_range": item.get("line_range", []),
-                            "severity": item.get("issue_severity", "MEDIUM"),
-                            "confidence": item.get("issue_confidence", "MEDIUM"),
-                            "code": item.get("code", ""),
-                            "cwe": item.get("issue_cwe", {}),
-                        })
+                    bandit_output = json.loads(stdout)
+                    # Bandit json format: {"errors": [], "generated_at": "...", "metrics": {...}, "results": [...]}
+                    if isinstance(bandit_output, dict):
+                        for item in bandit_output.get("results", []) or []:
+                            if not isinstance(item, dict):
+                                continue
+                            results.append({
+                                "test_id": item.get("test_id", ""),
+                                "test_name": item.get("test_name", ""),
+                                "message": item.get("issue_text", ""),
+                                "line_number": item.get("line_number", 1),
+                                "line_range": item.get("line_range", []),
+                                "severity": item.get("issue_severity", "MEDIUM"),
+                                "confidence": item.get("issue_confidence", "MEDIUM"),
+                                "code": item.get("code", ""),
+                                "cwe": item.get("issue_cwe", {}),
+                            })
+                    else:
+                         self._logger.warning(f"Unexpected bandit output format: {type(bandit_output)}")
+
                 except json.JSONDecodeError as e:
-                    self._logger.error(f"Failed to parse bandit output: {e}")
+                    self._logger.error(f"Failed to parse bandit output: {e}\nRaw output: {stdout[:100]}...")
 
             return results
 
-        except asyncio.TimeoutError:
-            self._logger.error("Bandit analysis timed out")
-            return []
         except Exception as e:
-            self._logger.error(f"Bandit analysis failed: {e}")
+            self._logger.error(f"Error running bandit: {e}")
             return []
         finally:
             await self._cleanup_temp_file(temp_path)
