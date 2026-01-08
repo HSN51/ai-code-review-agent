@@ -121,10 +121,10 @@ class QualityAgent(BaseAgent):
             if findings:
                 findings = await self._enhance_with_ai_suggestions(code, findings)
 
-            # If no static analysis findings, run AI-only analysis for deeper insights
-            if not findings:
-                ai_findings = await self._run_ai_quality_analysis(code, file_path)
-                findings.extend(ai_findings)
+            # Always run AI analysis for deeper, senior-level insights.
+            # We want to provide architectural advice even if the code style is perfect.
+            ai_findings = await self._run_ai_quality_analysis(code, file_path)
+            findings.extend(ai_findings)
 
         except Exception as e:
             self._log_error("Error during quality analysis", e)

@@ -90,11 +90,37 @@ class TestingAgent(BaseAgent):
             )
             findings.extend(ai_findings)
 
+            # Deduplication Strategy:
+            # If we have multiple findings for the same line, keep the highest severity one.
+            # If severities are equal, keep the first one.
+            unique_findings = {}
+            for f in findings:
+                key = (f.line_number, f.category)
+                if key not in unique_findings:
+                    unique_findings[key] = f
+                else:
+                    # Upgrade if severity is higher (Critical > High > Medium > Low > Info)
+                    existing = unique_findings[key]
+                    if self._severity_rank(f.severity) > self._severity_rank(existing.severity):
+                        unique_findings[key] = f
+            
+            findings = list(unique_findings.values())
+
         except Exception as e:
             self._log_error("Error during testing analysis", e)
 
         self._log_analysis_complete(file_path, len(findings))
         return findings
+
+    def _severity_rank(self, severity) -> int:
+        ranks = {
+            Severity.CRITICAL: 5,
+            Severity.HIGH: 4,
+            Severity.MEDIUM: 3,
+            Severity.LOW: 2,
+            Severity.INFO: 1
+        }
+        return ranks.get(severity, 0)
 
     def _is_test_file(self, file_path: str) -> bool:
         """Check if the file is a test file."""
@@ -228,31 +254,48 @@ class TestingAgent(BaseAgent):
         all_functions = structure["functions"] + structure["async_functions"]
 
         for func in all_functions:
-            # Skip private/internal functions (single underscore is okay)
+            # Skip dunder methods
             if func["name"].startswith("__") and func["name"].endswith("__"):
-                continue  # Skip dunder methods
+                continue
 
-            # Flag functions with high complexity
-            if func["complexity"] > 5:
+            complexity = func["complexity"]
+            
+            # Smart Filtering:
+            # - High Complexity (> 5): Critical to test.
+            # - Medium Complexity (3-5): Should have tests.
+            # - Low Complexity (<= 2): Skip annoying "missing test" unless it looks critical or is an edge case.
+            
+            if complexity > 5:
+                findings.append(self._create_finding(
+                    file_path=file_path,
+                    line_number=func["line"],
+                    severity=Severity.HIGH.value,
+                    category=FindingCategory.LOW_COVERAGE.value,
+                    message=f"High complexity function '{func['name']}' (score: {complexity}) lacks comprehensive tests.",
+                    suggestion=f"This function has complex logic. Create a test suite covering all {complexity} distinct paths.",
+                    confidence=0.9,
+                ))
+            elif complexity > 2:
                 findings.append(self._create_finding(
                     file_path=file_path,
                     line_number=func["line"],
                     severity=Severity.MEDIUM.value,
-                    category=FindingCategory.LOW_COVERAGE.value,
-                    message=f"Function '{func['name']}' has high complexity ({func['complexity']}) and should have comprehensive tests",
-                    suggestion=f"Create tests covering all {func['complexity']} paths through this function",
+                    category=FindingCategory.MISSING_TEST.value,
+                    message=f"Function '{func['name']}' is untested.",
+                    suggestion="Add a unit test to verify this function's behavior.",
                     confidence=0.8,
                 ))
+            # complexity <= 2: Silently ignored to reduce noise, unless it has many args.
 
-            # Flag functions with multiple arguments
-            if len(func["args"]) > 3:
+            # Special Check: Many arguments on simple functions often imply hidden state or configuration
+            if len(func["args"]) > 4:
                 findings.append(self._create_finding(
                     file_path=file_path,
                     line_number=func["line"],
                     severity=Severity.LOW.value,
-                    category=FindingCategory.MISSING_TEST.value,
-                    message=f"Function '{func['name']}' has {len(func['args'])} arguments - ensure all parameter combinations are tested",
-                    suggestion="Consider testing boundary values and invalid inputs for each parameter",
+                    category=FindingCategory.EDGE_CASE.value,
+                    message=f"Function '{func['name']}' accepts {len(func['args'])} arguments.",
+                    suggestion="Ensure you test various combinations of these arguments, including None or invalid values.",
                     confidence=0.7,
                 ))
 
